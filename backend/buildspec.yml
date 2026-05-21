@@ -1,0 +1,39 @@
+version: 0.2
+
+phases:
+  pre_build:
+    commands:
+      # Login to Amazon ECR
+      - aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${AWS_ACCOUNT_NUMBER}.dkr.ecr.${AWS_REGION}.amazonaws.com
+      # Set the image tag
+      - IMAGE_TAG=${CODEBUILD_RESOLVED_SOURCE_VERSION}
+      # Set the full URI for the Docker image
+      - IMAGE_URI=${AWS_ACCOUNT_NUMBER}.dkr.ecr.${AWS_REGION}.amazonaws.com/${CI_PROJECT_BE_NAME}:${IMAGE_TAG}
+
+  build:
+    commands:
+      # Build Docker image
+      - cd backend
+      - docker build -f Dockerfile -t ${IMAGE_URI} .
+
+  post_build:
+    commands:
+      # Push the Docker image to ECR
+      - docker push ${IMAGE_URI}
+      
+      # 1. Lấy Task Definition hiện tại
+      - TASK_DEFINITION=$(aws ecs describe-task-definition --task-definition ${TASK_NAME_BE} --region ${AWS_REGION})
+      
+      # 2. Tạo bản Register Task Definition mới với Image URI vừa build
+      - NEW_TASK_DEF_JSON=$(echo $TASK_DEFINITION | jq --arg IMAGE "${IMAGE_URI}" '.taskDefinition | .containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn) | del(.revision) | del(.status) | del(.requiresAttributes) | del(.compatibilities) | del(.registeredAt) | del(.registeredBy)')
+      
+      # 3. Đăng ký Task Definition mới và lấy ARN của nó
+      - NEW_REVISION_ARN=$(aws ecs register-task-definition --region ${AWS_REGION} --cli-input-json "$NEW_TASK_DEF_JSON" --query 'taskDefinition.taskDefinitionArn' --output text)
+      
+      # 4. Cập nhật ECS Service trực tiếp để sử dụng Task Definition mới
+      # ECS sẽ tự động thực hiện Rolling Update (Blue/Green theo kiểu mặc định của ECS)
+      - aws ecs update-service --cluster ${ECS_CLUSTER_NAME} --service ${ECS_SERVICE_NAME} --task-definition $NEW_REVISION_ARN --region ${AWS_REGION}
+
+artifacts:
+  files:
+    - imageDetail.json
